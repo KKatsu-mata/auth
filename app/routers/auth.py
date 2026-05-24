@@ -1,9 +1,12 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response, Cookie
+import bcrypt
+import uuid
+import redis
 from app.schemas import UserCreate
 from app.database import get_connection
-import bcrypt
 
 router = APIRouter()
+r = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
 @router.post("/register")
 def register(user: UserCreate):
@@ -37,7 +40,7 @@ def register(user: UserCreate):
     return {"message": "ユーザ登録が完了しました!"}
 
 @router.post("/login")
-def login(user: UserCreate):
+def login(user: UserCreate, response: Response):
     # 1. DB接続
     conn = get_connection()
     cur = conn.cursor()
@@ -62,4 +65,25 @@ def login(user: UserCreate):
     # 4. 接続終了
     cur.close()
     conn.close()
+
+    # 5. セッションID発行
+    session_id = str(uuid.uuid4())
+    r.setex(session_id, 1800, user.username)
+    response.set_cookie(key="session_id", value=session_id)
     return {"message": "ログイン成功しました"}
+
+@router.get("/me")
+def me(session_id: str = Cookie(default=None)):
+    if session_id is None:
+            raise HTTPException(status_code=401, detail="ログイン情報がありません。")
+    username = r.get(session_id)
+    if session_id is None or username is None:
+        raise HTTPException(status_code=401, detail="ログイン情報がありません。")
+    return {"username": username}
+
+@router.post("/logout")
+def logout(response: Response, session_id: str = Cookie(default=None)):
+    if session_id is not None:
+        r.delete(session_id)
+        response.delete_cookie(key="session_id")
+    return {"message": "ログアウトしました"}
