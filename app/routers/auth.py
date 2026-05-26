@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Response, Cookie, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials
 import bcrypt
 import uuid
 import redis
@@ -125,10 +125,45 @@ def me_jwt(credentials: HTTPAuthorizationCredentials = Depends(security)):
     except JWTError:
         raise HTTPException(status_code=401, detail="ログイン情報がありません。")
     username = payload.get("sub")
-    # if username is None:
-    #     raise HTTPException(status_code=401, detail="ログイン情報がありません")
+    if username is None:
+        raise HTTPException(status_code=401, detail="ログイン情報がありません")
     return {"username": username}
+
+@router.get("/me-basic")
+def me_basic(credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
+    username = credentials.username
+    password = credentials.password
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    SELECT_HASHED_PASSWORD = """
+        SELECT hashed_password FROM users WHERE username = %s;
+    """
+    cur.execute(SELECT_HASHED_PASSWORD, (username, ))
+
+    result = cur.fetchone()
+    if result is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=401,
+            detail="ユーザーネームまたはパスワードが間違っています",
+            headers={"WWW-Authenticate": "Basic"})
+    is_password_valid = bcrypt.checkpw(password.encode('utf-8'), result[0].encode('utf-8'))
+    if not is_password_valid:
+        cur.close()
+        conn.close()
+        raise HTTPException(
+            status_code=401,
+            detail="ユーザーネームまたはパスワードが間違っています",
+            headers={"WWW-Authenticate": "Basic"}
+        )
     
+    cur.close()
+    conn.close()
+    return {"username": username}
+
 @router.post("/logout")
 def logout(response: Response, session_id: str = Cookie(default=None)):
     if session_id is not None:
