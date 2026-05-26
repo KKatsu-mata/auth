@@ -8,6 +8,7 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "psycopg2-binary>=2.9.12",
     "python-dotenv>=1.2.2",
+    "python-jose[cryptgraphy]>=3.5.0",
     "redis>=7.4.0",
     "uvicorn>=0.47.0",
 ]

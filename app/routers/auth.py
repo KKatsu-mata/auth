@@ -1,12 +1,19 @@
-from fastapi import APIRouter, HTTPException, Response, Cookie
+from fastapi import APIRouter, HTTPException, Response, Cookie, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import bcrypt
 import uuid
 import redis
+from jose import jwt, JWTError
+from datetime import datetime, timedelta, timezone
 from app.schemas import UserCreate
 from app.database import get_connection
 
 router = APIRouter()
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+SECRET_KEY = "your-secret-key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+security = HTTPBearer()
 
 @router.post("/register")
 def register(user: UserCreate):
@@ -72,15 +79,56 @@ def login(user: UserCreate, response: Response):
     response.set_cookie(key="session_id", value=session_id)
     return {"message": "ログイン成功しました"}
 
+@router.post("/login-jwt")
+def login_jwt(user: UserCreate):
+    # 1. DB接続
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # 2. ユーザ情報照会
+    SELECT_HASHED_PASSWORD = """
+        SELECT hashed_password FROM users WHERE username = %s;
+    """
+    cur.execute(SELECT_HASHED_PASSWORD, (user.username, ))
+    result = cur.fetchone()
+    if result is None:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+    is_password_valid = bcrypt.checkpw(user.password.encode('utf-8'), result[0].encode('utf-8'))
+    if not is_password_valid:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+    
+    # 3. JWTトークン発行
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    token = jwt.encode({"sub": user.username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+    return {"access_token": token, "token_type": "bearer"}
+
 @router.get("/me")
 def me(session_id: str = Cookie(default=None)):
     if session_id is None:
             raise HTTPException(status_code=401, detail="ログイン情報がありません。")
     username = r.get(session_id)
-    if session_id is None or username is None:
+    if username is None:
         raise HTTPException(status_code=401, detail="ログイン情報がありません。")
     return {"username": username}
 
+@router.get("/me-jwt")
+def me_jwt(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    if token is None:
+        raise HTTPException(status_code=401, detail="ログイン情報がありません。")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="ログイン情報がありません。")
+    username = payload.get("sub")
+    # if username is None:
+    #     raise HTTPException(status_code=401, detail="ログイン情報がありません")
+    return {"username": username}
+    
 @router.post("/logout")
 def logout(response: Response, session_id: str = Cookie(default=None)):
     if session_id is not None:
