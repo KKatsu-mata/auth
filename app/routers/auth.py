@@ -109,7 +109,7 @@ def login_jwt(user: UserCreate):
 @router.get("/me")
 def me(session_id: str = Cookie(default=None)):
     if session_id is None:
-            raise HTTPException(status_code=401, detail="ログイン情報がありません。")
+        raise HTTPException(status_code=401, detail="ログイン情報がありません。")
     username = r.get(session_id)
     if username is None:
         raise HTTPException(status_code=401, detail="ログイン情報がありません。")
