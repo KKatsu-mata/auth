@@ -6,7 +6,7 @@ import redis
 from jose import jwt, JWTError
 from datetime import datetime, timedelta, timezone
 from app.schemas import UserCreate
-from app.database import get_connection
+import app.database as database
 
 router = APIRouter()
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
@@ -18,60 +18,54 @@ security = HTTPBearer()
 @router.post("/register")
 def register(user: UserCreate):
     # 1. DB接続
-    conn = get_connection()
-    cur = conn.cursor()
+    conn, cur = database.open_db()
 
     # 2. usernameの重複チェック
     SEARCH_USERNAME = """
     SELECT username FROM users WHERE username = %s;
     """
-    cur.execute(SEARCH_USERNAME, (user.username,))
-    if cur.fetchone():
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="そのユーザーネームはすでに存在します")
+    try:
+        cur.execute(SEARCH_USERNAME, (user.username,))
+        if cur.fetchone():
+            raise HTTPException(status_code=400, detail="そのユーザーネームはすでに存在します")
 
-    # 3. パスワードのハッシュ化
-    hashed_password = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt()).decode("utf-8")
+        # 3. パスワードのハッシュ化
+        hashed_password = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt()).decode("utf-8")
 
-    # 4. INSERT
-    CREATE_USER = """
-    INSERT INTO users (username, hashed_password) VALUES (%s, %s);
-    """
-    cur.execute(CREATE_USER, (user.username, hashed_password,))
-    conn.commit()
+        # 4. INSERT
+        CREATE_USER = """
+        INSERT INTO users (username, hashed_password) VALUES (%s, %s);
+        """
+        cur.execute(CREATE_USER, (user.username, hashed_password,))
+        conn.commit()
 
     # 5. 接続終了
-    cur.close()
-    conn.close()
+    finally:
+        database.close_db(conn, cur)
     return {"message": "ユーザ登録が完了しました!"}
 
 @router.post("/login")
 def login(user: UserCreate, response: Response):
     # 1. DB接続
-    conn = get_connection()
-    cur = conn.cursor()
+    conn, cur = database.open_db()
 
     # 2. ユーザー情報照会
     SELECT_HASHED_PASSWORD = """
     SELECT hashed_password FROM users WHERE username = %s;
     """
-    cur.execute(SELECT_HASHED_PASSWORD, (user.username,))
-    result = cur.fetchone()
-    if result is None:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+    try:
+        cur.execute(SELECT_HASHED_PASSWORD, (user.username,))
+        result = cur.fetchone()
+        if result is None:
+            raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
 
-    is_valid = bcrypt.checkpw(user.password.encode('utf-8'), result[0].encode('utf-8'))
-    if not is_valid:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+        is_valid = verify_password(user.password, result[0])
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
     
     # 4. 接続終了
-    cur.close()
-    conn.close()
+    finally:
+        database.close_db(conn, cur)
 
     # 5. セッションID発行
     session_id = str(uuid.uuid4())
@@ -82,24 +76,22 @@ def login(user: UserCreate, response: Response):
 @router.post("/login-jwt")
 def login_jwt(user: UserCreate):
     # 1. DB接続
-    conn = get_connection()
-    cur = conn.cursor()
+    conn, cur =database.open_db()
 
     # 2. ユーザ情報照会
     SELECT_HASHED_PASSWORD = """
         SELECT hashed_password FROM users WHERE username = %s;
     """
-    cur.execute(SELECT_HASHED_PASSWORD, (user.username, ))
-    result = cur.fetchone()
-    if result is None:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
-    is_password_valid = bcrypt.checkpw(user.password.encode('utf-8'), result[0].encode('utf-8'))
-    if not is_password_valid:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+    try:
+        cur.execute(SELECT_HASHED_PASSWORD, (user.username, ))
+        result = cur.fetchone()
+        if result is None:
+            raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+        is_valid = verify_password(user.password, result[0])
+        if not is_valid:
+            raise HTTPException(status_code=400, detail="ユーザーネームまたはパスワードが間違っています")
+    finally:
+        database.close_db(conn, cur)
     
     # 3. JWTトークン発行
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -134,34 +126,28 @@ def me_basic(credentials: HTTPBasicCredentials = Depends(HTTPBasic())):
     username = credentials.username
     password = credentials.password
 
-    conn = get_connection()
-    cur = conn.cursor()
+    conn, cur = database.open_db()
 
     SELECT_HASHED_PASSWORD = """
         SELECT hashed_password FROM users WHERE username = %s;
     """
-    cur.execute(SELECT_HASHED_PASSWORD, (username, ))
-
-    result = cur.fetchone()
-    if result is None:
-        cur.close()
-        conn.close()
-        raise HTTPException(
-            status_code=401,
-            detail="ユーザーネームまたはパスワードが間違っています",
-            headers={"WWW-Authenticate": "Basic"})
-    is_password_valid = bcrypt.checkpw(password.encode('utf-8'), result[0].encode('utf-8'))
-    if not is_password_valid:
-        cur.close()
-        conn.close()
-        raise HTTPException(
-            status_code=401,
-            detail="ユーザーネームまたはパスワードが間違っています",
-            headers={"WWW-Authenticate": "Basic"}
-        )
-    
-    cur.close()
-    conn.close()
+    try:
+        cur.execute(SELECT_HASHED_PASSWORD, (username, ))
+        result = cur.fetchone()
+        if result is None:
+            raise HTTPException(
+                status_code=401,
+                detail="ユーザーネームまたはパスワードが間違っています",
+                headers={"WWW-Authenticate": "Basic"})
+        is_valid = verify_password(password, result[0])
+        if not is_valid:
+            raise HTTPException(
+                status_code=401,
+                detail="ユーザーネームまたはパスワードが間違っています",
+                headers={"WWW-Authenticate": "Basic"}
+            )
+    finally:
+        database.close_db(conn, cur)
     return {"username": username}
 
 @router.post("/logout")
@@ -170,3 +156,14 @@ def logout(response: Response, session_id: str = Cookie(default=None)):
         r.delete(session_id)
         response.delete_cookie(key="session_id")
     return {"message": "ログアウトしました"}
+
+def verify_password(plain, hashed):
+    """パスワード検証関数
+    arg:
+        plain: 平文パスワード
+        hashed: ハッシュ化パスワード
+    return:
+        bool: パスワードが一致するかどうか
+    """
+    verify = bcrypt.checkpw(plain.encode('utf-8'), hashed.encode('utf-8'))
+    return verify
